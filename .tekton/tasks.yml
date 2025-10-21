@@ -3,56 +3,131 @@ kind: Task
 metadata:
   name: cleanup
 spec:
-  description: This task will clean up a workspace by deleting all the files.
+  description: |
+    Cleans the workspace before cloning the repository.
+    This prevents "destination path already exists" git-clone errors.
+  workspaces:
+    - name: source
+      description: The workspace to clean
+  steps:
+    - name: cleanup
+      image: alpine:3
+      script: |
+        #!/bin/sh
+        set -eu
+        echo "🧹 Cleaning workspace at $(workspaces.source.path)..."
+        rm -rf $(workspaces.source.path)/* || true
+        rm -rf $(workspaces.source.path)/.[!.]* || true
+        rm -rf $(workspaces.source.path)/..?* || true
+        echo "✅ Workspace cleaned."
+
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: git-clone
+spec:
+  description: Clone Git repository
+  workspaces:
+    - name: source
+  params:
+    - name: url
+      type: string
+    - name: revision
+      type: string
+      default: main
+    - name: subdirectory
+      type: string
+      default: app
+  steps:
+    - name: clone
+      image: alpine/git
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/bin/sh
+        set -e
+        mkdir -p $(params.subdirectory)
+        git clone -b $(params.revision) $(params.url) $(params.subdirectory)
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: flake8
+spec:
+  description: Run flake8 linting
   workspaces:
     - name: source
   steps:
-    - name: remove
-      image: alpine:3
-      env:
-        - name: WORKSPACE_SOURCE_PATH
-          value: $(workspaces.source.path)
-      workingDir: $(workspaces.source.path)
-      securityContext:
-        runAsNonRoot: false
-        runAsUser: 0
+    - name: lint
+      image: python:3.9-slim
+      workingDir: $(workspaces.source.path)/app
       script: |
-              #!/usr/bin/env sh
-                set -eu
-                echo "Removing all files from ${WORKSPACE_SOURCE_PATH} ..."
-                # Delete any existing contents of the directory if it exists.
-                #
-                # We don't just "rm -rf ${WORKSPACE_SOURCE_PATH}" because ${WORKSPACE_SOURCE_PATH} might be "/"
-                # or the root of a mounted volume.
-                if [ -d "${WORKSPACE_SOURCE_PATH}" ] ; then
-                  # Delete non-hidden files and directories
-                  rm -rf "${WORKSPACE_SOURCE_PATH:?}"/*
-                  # Delete files and directories starting with . but excluding ..
-                  rm -rf "${WORKSPACE_SOURCE_PATH}"/.[!.]*
-                  # Delete files and directories starting with .. plus any other character
-                  rm -rf "${WORKSPACE_SOURCE_PATH}"/..?*
-                fi
+        #!/bin/bash
+        set -e
+        pip install --upgrade pip wheel
+        pip install -r requirements.txt flake8
+        flake8 --max-line-length=120 .
 ---
 apiVersion: tekton.dev/v1beta1
 kind: Task
 metadata:
   name: nose
 spec:
-  description: This task runs nose test cases
+  description: Run nose tests
   workspaces:
     - name: source
   params:
     - name: args
-      description: Arguments to pass to nose
       type: string
       default: "-v"
-  steps: 
-    - name: nosetests
+  steps:
+    - name: test
       image: python:3.9-slim
-      workingDir: $(workspaces.source.path)
+      workingDir: $(workspaces.source.path)/app
       script: |
-              #!/bin/bash
-              set -e
-              python -m pip install --upgrade pip wheel
-              pip install -r requirements.txt
-              nosetests $(params.args)
+        #!/bin/bash
+        set -e
+        pip install --upgrade pip wheel
+        pip install -r requirements.txt nose
+        nosetests $(params.args)
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: kaniko
+spec:
+  description: Build container image using Kaniko
+  workspaces:
+    - name: source
+  params:
+    - name: IMAGE
+      description: Target image name (e.g. us.icr.io/namespace/app:latest)
+  steps:
+    - name: build
+      image: gcr.io/kaniko-project/executor:latest
+      workingDir: $(workspaces.source.path)
+      args:
+        - "--context=$(workspaces.source.path)"
+        - "--dockerfile=$(workspaces.source.path)/Dockerfile"
+        - "--destination=$(params.IMAGE)"
+        - "--insecure"
+        - "--skip-tls-verify"
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: oc-deploy
+spec:
+  description: Deploy app to OpenShift
+  params:
+    - name: app-name
+      type: string
+    - name: build-image
+      type: string
+  steps:
+    - name: deploy
+      image: quay.io/openshift/origin-cli:latest
+      script: |
+        #!/bin/sh
+        set -e
+        oc create deployment $(params.app-name) --image=$(params.build-image) --dry-run=client -o yaml | oc apply -f -

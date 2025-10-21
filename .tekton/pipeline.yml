@@ -1,0 +1,74 @@
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: ci-cd-pipeline
+spec:
+  workspaces:
+    - name: output
+  params:
+    - name: git-url
+      type: string
+    - name: image-name
+      type: string
+    - name: app-name
+      type: string
+  tasks:
+    - name: cleanup
+      taskRef:
+        name: cleanup
+      workspaces:
+        - name: source
+          workspace: output
+
+    - name: git-clone
+      taskRef:
+        name: git-clone
+      workspaces:
+        - name: source
+          workspace: output
+      params:
+        - name: url
+          value: $(params.git-url)
+      runAfter:
+        - cleanup
+
+    - name: flake8
+      taskRef:
+        name: flake8
+      workspaces:
+        - name: source
+          workspace: output
+      runAfter:
+        - git-clone
+
+    - name: nose
+      taskRef:
+        name: nose
+      workspaces:
+        - name: source
+          workspace: output
+      runAfter:
+        - flake8
+
+    - name: build
+      taskRef:
+        name: kaniko
+      workspaces:
+        - name: source
+          workspace: output
+      params:
+        - name: IMAGE
+          value: $(params.build-image)
+      runAfter:
+        - nose
+
+    - name: deploy
+      taskRef:
+        name: oc-deploy
+      params:
+        - name: app-name
+          value: $(params.app-name)
+        - name: build-image
+          value: $(params.image-name)
+      runAfter:
+        - build

@@ -1,0 +1,21 @@
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: kaniko
+spec:
+  description: Build image with Kaniko (non-privileged)
+  workspaces:
+    - name: source
+  params:
+    - name: IMAGE
+      description: Full image URL, e.g. us.icr.io/sn-labsassets/app:latest
+  steps:
+    - name: build
+      image: gcr.io/kaniko-project/executor:latest
+      workingDir: $(workspaces.source.path)
+      args:
+        - "--context=$(workspaces.source.path)"
+        - "--dockerfile=$(workspaces.source.path)/Dockerfile"
+        - "--destination=$(params.IMAGE)"
+        - "--insecure"
+        - "--skip-tls-verify"
